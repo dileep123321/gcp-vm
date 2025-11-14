@@ -1,18 +1,20 @@
-name: CI/CD FastAPI → GCP VM (OIDC + ephemeral SSH key)
+name: CI/CD FastAPI → GCP VM (OIDC)
 
 on:
   push:
     branches: ["main"]
 
-env:
-  IMAGE_NAME: fastapi
-  IMAGE_TAG: latest
-  IMAGE_HOST: us-central1-docker.pkg.dev
-  ARTIFACT_REPO: gcp-vm
-
 permissions:
   contents: read
   id-token: write
+
+env:
+  IMAGE_NAME: fastapi
+  IMAGE_TAG: latest
+  REGION: us-central1
+  ZONE: us-central1-a
+  ARTIFACT_REPO: gcp-vm
+  IMAGE_HOST: us-central1-docker.pkg.dev
 
 jobs:
   build-and-deploy:
@@ -28,85 +30,51 @@ jobs:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
 
-      - name: Setup gcloud SDK
+      - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Configure docker auth for Artifact Registry
+      - name: Docker auth
         run: |
           gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
-      - name: Build and Push Docker image
+      - name: Build & Push Image
         run: |
           PROJECT=${{ secrets.GCP_PROJECT_ID }}
-          FULL_IMAGE="${{ env.IMAGE_HOST }}/${PROJECT}/${{ env.ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
-          echo "FULL_IMAGE=${FULL_IMAGE}" >> $GITHUB_ENV
-          docker build -t "${FULL_IMAGE}" -f docker/Dockerfile .
-          docker push "${FULL_IMAGE}"
+          FULL_IMAGE="${IMAGE_HOST}/${PROJECT}/${ARTIFACT_REPO}/${IMAGE_NAME}:${IMAGE_TAG}"
+          echo "FULL_IMAGE=$FULL_IMAGE" >> $GITHUB_ENV
+          docker build -t "$FULL_IMAGE" -f docker/Dockerfile .
+          docker push "$FULL_IMAGE"
 
-      - name: Generate ephemeral SSH key pair
+      - name: Generate ephemeral SSH key
         run: |
-          KEY_DIR=${{ runner.temp }}/deploy-ssh
-          mkdir -p "$KEY_DIR"
-          ssh-keygen -t ed25519 -f "$KEY_DIR/id_ed25519" -N "" -C "github-actions-deploy"
+          KEY_DIR=$(mktemp -d)
+          ssh-keygen -t ed25519 -f "$KEY_DIR/id_ed25519" -N ""
           echo "SSH_KEY_DIR=$KEY_DIR" >> $GITHUB_ENV
           PUB_KEY=$(cat "$KEY_DIR/id_ed25519.pub")
-          echo "SSH_PUB=${PUB_KEY}" >> $GITHUB_ENV
+          echo "SSH_PUB=$PUB_KEY" >> $GITHUB_ENV
 
-      - name: Write terraform.tfvars
-        run: |
-          mkdir -p infra/terraform
-          cat > infra/terraform/terraform.tfvars <<TFVARS
-project_id = "${{ secrets.GCP_PROJECT_ID }}"
-region     = "us-central1"
-zone       = "us-central1-a"
-container_image = "${{ env.FULL_IMAGE }}"
-vm_name = "backend-vm"
-ssh_user = "github"
-ssh_public_key = "${{ env.SSH_PUB }}"
-TFVARS
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
-        with:
-          terraform_version: 1.5.7
-
-      - name: Terraform Init
-        working-directory: infra/terraform
-        run: terraform init -input=false
-
-      - name: Terraform Plan & Apply
+      - name: Terraform Apply
         working-directory: infra/terraform
         run: |
-          terraform plan -input=false -out=tfplan \
+          terraform init -input=false
+          terraform apply -auto-approve \
+            -var="project_id=${{ secrets.GCP_PROJECT_ID }}" \
             -var="container_image=${{ env.FULL_IMAGE }}" \
-            -var="ssh_public_key=${{ env.SSH_PUB }}" \
-            -var="ssh_user=github"
-          terraform apply -input=false -auto-approve tfplan
-
-      - name: Wait for VM
-        run: sleep 15
+            -var="ssh_user=github" \
+            -var="ssh_public_key=${{ env.SSH_PUB }}"
 
       - name: Get VM IP
-        id: get_ip
+        id: getip
+        working-directory: infra/terraform
         run: |
-          cd infra/terraform
           VM_IP=$(terraform output -raw vm_ip)
-          echo "VM_IP=${VM_IP}" >> $GITHUB_ENV
-          echo "vm_ip=${VM_IP}" >> $GITHUB_OUTPUT
+          echo "VM_IP=$VM_IP" >> $GITHUB_ENV
 
-      - name: SSH Deploy - Run container
+      - name: Deploy container via SSH
         run: |
-          KEY_DIR=${{ env.SSH_KEY_DIR }}
-          VM_IP=${{ env.VM_IP }}
-          FULL_IMAGE=${{ env.FULL_IMAGE }}
-
-          chmod 600 "${KEY_DIR}/id_ed25519"
-
-          SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes"
-
-          ssh $SSH_OPTS -i "${KEY_DIR}/id_ed25519" github@${VM_IP} \
-            "sudo gcloud auth configure-docker us-central1-docker.pkg.dev --quiet || true; \
-             sudo docker pull ${FULL_IMAGE}; \
-             sudo docker rm -f fastapi-app || true; \
-             sudo docker run -d --restart unless-stopped --name fastapi-app -p 8000:8000 ${FULL_IMAGE}"
-
+          KEY="${{ env.SSH_KEY_DIR }}/id_ed25519"
+          chmod 600 "$KEY"
+          ssh -o StrictHostKeyChecking=no -i "$KEY" github@${{ env.VM_IP }} \
+            "sudo docker pull ${{ env.FULL_IMAGE }} && \
+             sudo docker rm -f fastapi-app || true && \
+             sudo docker run -d --restart unless-stopped -p 8000:8000 --name fastapi-app ${{ env.FULL_IMAGE }}"
