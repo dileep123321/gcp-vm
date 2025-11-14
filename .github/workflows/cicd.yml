@@ -1,9 +1,13 @@
-name: Build and Deploy FastAPI to GCP VM
+name: Build and Deploy to GCP VM
 
 on:
   push:
     branches:
       - main
+
+permissions:
+  contents: read
+  id-token: write
 
 env:
   PROJECT_ID: kxnwork
@@ -16,40 +20,63 @@ env:
   VM_ZONE: us-central1-a
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
-    permissions:
-      contents: 'read'
-      id-token: 'write'
 
     steps:
-
-    - name: Checkout
+    # -----------------------
+    # CHECKOUT REPO
+    # -----------------------
+    - name: Checkout Repository
       uses: actions/checkout@v3
 
+    # -----------------------
+    # OIDC AUTH TO GCP
+    # -----------------------
     - name: Authenticate to Google Cloud
+      id: gcp-auth
       uses: google-github-actions/auth@v2
       with:
-        workload_identity_provider: "projects/382207431122/locations/global/workloadIdentityPools/github-pool/providers/github-oidc"
-        service_account: "github-deployer@kxnwork.iam.gserviceaccount.com"
+        workload_identity_provider: "projects/382207431122/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
+        service_account: "gh-ci-sa@kxnwork.iam.gserviceaccount.com"
 
-    - name: Set up gcloud CLI
+    # -----------------------
+    # SETUP GCLOUD CLI
+    # -----------------------
+    - name: Setup Google Cloud SDK
       uses: google-github-actions/setup-gcloud@v2
+      with:
+        project_id: ${{ env.PROJECT_ID }}
 
-    - name: Configure Docker for Artifact Registry
+    # -----------------------
+    # DOCKER AUTH FOR ARTIFACT REGISTRY
+    # -----------------------
+    - name: Configure Docker Authentication
       run: |
-        gcloud auth configure-docker $IMAGE_HOST
+        gcloud auth configure-docker $IMAGE_HOST --quiet
 
+    # -----------------------
+    # BUILD & PUSH DOCKER IMAGE
+    # -----------------------
     - name: Build & Push Docker Image
       run: |
         IMAGE_URI="$IMAGE_HOST/$PROJECT_ID/$ARTIFACT_REPO/$IMAGE_NAME:$IMAGE_TAG"
-        echo "IMAGE_URI=$IMAGE_URI"
-        docker build -t $IMAGE_URI ./app
+        echo "Using Image: $IMAGE_URI"
+
+        docker build -t $IMAGE_URI -f docker/Dockerfile .
         docker push $IMAGE_URI
 
-    - name: Deploy on VM
+    # -----------------------
+    # DEPLOY TO GCP VM USING SSH
+    # -----------------------
+    - name: Deploy to GCP VM (SSH Pull & Restart Container)
       run: |
-        gcloud compute instances update-container $VM_NAME \
-          --zone=$VM_ZONE \
-          --container-image="$IMAGE_HOST/$PROJECT_ID/$ARTIFACT_REPO/$IMAGE_NAME:$IMAGE_TAG"
+        IMAGE_URI="$IMAGE_HOST/$PROJECT_ID/$ARTIFACT_REPO/$IMAGE_NAME:$IMAGE_TAG"
+
+        gcloud compute ssh $VM_NAME --zone=$VM_ZONE --command "
+          sudo docker pull $IMAGE_URI &&
+          sudo docker stop fastapi || true &&
+          sudo docker rm fastapi || true &&
+          sudo docker run -d --name fastapi -p 8000:8000 $IMAGE_URI
+        "
 
