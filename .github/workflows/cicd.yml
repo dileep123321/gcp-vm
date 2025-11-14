@@ -1,75 +1,79 @@
-name: CI/CD FastAPI → GCP VM (OIDC + Terraform)
+name: Build and Deploy to GCP VM
 
 on:
   push:
-    branches: ["main"]
+    branches:
+      - main
 
 env:
+  PROJECT_ID: kxnwork
+  REGION: us-central1
   IMAGE_NAME: fastapi
   IMAGE_TAG: latest
-  IMAGE_HOST: us-central1-docker.pkg.dev
   ARTIFACT_REPO: gcp-vm
-
-permissions:
-  contents: read
-  id-token: write
+  IMAGE_HOST: us-central1-docker.pkg.dev
+  VM_NAME: fastapi-vm
+  VM_ZONE: us-central1-a
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      # ------------------
+      # CHECKOUT CODE
+      # ------------------
+      - name: Checkout
+        uses: actions/checkout@v3
 
-      - name: Authenticate to Google Cloud (OIDC)
+      # ------------------
+      # AUTH USING OIDC
+      # ------------------
+      - name: Authenticate to Google Cloud
+        id: auth
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          workload_identity_provider: "projects/382207431122/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
+          service_account: "gh-ci-sa@kxnwork.iam.gserviceaccount.com"
 
-      - name: Setup gcloud
+      # ------------------
+      # INSTALL CLOUD SDK
+      # ------------------
+      - name: Setup Google Cloud CLI
         uses: google-github-actions/setup-gcloud@v2
-
-      - name: Configure docker auth
-        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
-
-      - name: Build and push Docker image
-        run: |
-          PROJECT=${{ secrets.GCP_PROJECT_ID }}
-          FULL_IMAGE="${IMAGE_HOST}/${PROJECT}/${ARTIFACT_REPO}/${IMAGE_NAME}:${IMAGE_TAG}"
-          echo "FULL_IMAGE=$FULL_IMAGE" >> $GITHUB_ENV
-          docker build -t "$FULL_IMAGE" -f docker/Dockerfile .
-          docker push "$FULL_IMAGE"
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
         with:
-          terraform_version: 1.5.7
+          project_id: ${{ env.PROJECT_ID }}
 
-      - name: Terraform Init
-        working-directory: infra/terraform
-        run: terraform init -input=false
-
-      - name: Terraform Apply
-        working-directory: infra/terraform
-        run: terraform apply -auto-approve -input=false
-
-      - name: Get VM IP
-        id: get_ip
-        working-directory: infra/terraform
-        run: echo "VM_IP=$(terraform output -raw vm_ip)" >> $GITHUB_ENV
-
-      - name: Deploy container to VM
+      # ------------------
+      # CONFIGURE DOCKER LOGIN
+      # ------------------
+      - name: Configure Docker for Artifact Registry
         run: |
-          VM_IP=${{ env.VM_IP }}
-          FULL_IMAGE=${{ env.FULL_IMAGE }}
+          gcloud auth configure-docker $IMAGE_HOST --quiet
 
-          ssh -o StrictHostKeyChecking=no \
-              -i "${HOME}/.ssh/google_compute_engine" \
-              github@${VM_IP} \
-              "sudo docker pull ${FULL_IMAGE} &&
-               sudo docker stop fastapi-app || true &&
-               sudo docker rm fastapi-app || true &&
-               sudo docker run -d --restart unless-stopped -p 8000:8000 --name fastapi-app ${FULL_IMAGE}"
+      # ------------------
+      # DOCKER BUILD & PUSH
+      # ------------------
+      - name: Build & Push Docker Image
+        run: |
+          IMAGE_URI="$IMAGE_HOST/$PROJECT_ID/$ARTIFACT_REPO/$IMAGE_NAME:$IMAGE_TAG"
+          echo "IMAGE_URI=$IMAGE_URI"
+
+          docker build -t $IMAGE_URI ./app
+          docker push $IMAGE_URI
+
+      # ------------------
+      # DEPLOY TO VM
+      # Pull latest image & restart container
+      # ------------------
+      - name: Deploy to VM
+        run: |
+          IMAGE_URI="$IMAGE_HOST/$PROJECT_ID/$ARTIFACT_REPO/$IMAGE_NAME:$IMAGE_TAG"
+
+          gcloud compute ssh $VM_NAME --zone=$VM_ZONE --command "
+            sudo docker pull $IMAGE_URI &&
+            sudo docker stop fastapi || true &&
+            sudo docker rm fastapi || true &&
+            sudo docker run -d --name fastapi -p 80:80 $IMAGE_URI
+          "
 
