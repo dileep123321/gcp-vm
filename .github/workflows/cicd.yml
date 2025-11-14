@@ -5,10 +5,9 @@ on:
     branches:
       - main
 
-# IMPORTANT — REQUIRED FOR OIDC LOGIN
 permissions:
-  id-token: write
   contents: read
+  id-token: write  # REQUIRED for OIDC
 
 env:
   PROJECT_ID: kxnwork
@@ -64,7 +63,7 @@ jobs:
           IMAGE_URI="$IMAGE_HOST/$PROJECT_ID/$ARTIFACT_REPO/$IMAGE_NAME:$IMAGE_TAG"
           echo "IMAGE_URI=$IMAGE_URI"
 
-          docker build -t $IMAGE_URI ./app
+          docker build -t $IMAGE_URI -f docker/Dockerfile .
           docker push $IMAGE_URI
 
       # ------------------
@@ -78,6 +77,6 @@ jobs:
             sudo docker pull $IMAGE_URI &&
             sudo docker stop fastapi || true &&
             sudo docker rm fastapi || true &&
-            sudo docker run -d --name fastapi -p 80:80 $IMAGE_URI
+            sudo docker run -d --name fastapi -p 8000:8000 $IMAGE_URI
           "
 
