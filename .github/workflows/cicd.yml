@@ -5,6 +5,11 @@ on:
     branches:
       - main
 
+# IMPORTANT — REQUIRED FOR OIDC LOGIN
+permissions:
+  id-token: write
+  contents: read
+
 env:
   PROJECT_ID: kxnwork
   REGION: us-central1
@@ -64,7 +69,6 @@ jobs:
 
       # ------------------
       # DEPLOY TO VM
-      # Pull latest image & restart container
       # ------------------
       - name: Deploy to VM
         run: |
