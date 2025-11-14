@@ -1,0 +1,5 @@
+project_id = "${PROJECT_ID}"
+region     = "us-central1"
+zone       = "us-central1-a"
+container_image = "${IMAGE_HOST}/${PROJECT_ID}/${ARTIFACT_REPO}/${IMAGE_NAME}:${IMAGE_TAG}"
+vm_name = "fastapi-vm"

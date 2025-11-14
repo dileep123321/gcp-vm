@@ -1,0 +1,76 @@
+name: CI/CD Build → Push → Terraform (OIDC)
+
+on:
+  push:
+    branches: [ "main" ]
+
+env:
+  IMAGE_NAME: ${IMAGE_NAME}
+  IMAGE_TAG: ${IMAGE_TAG}
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Authenticate to GCP using Workload Identity Federation (OIDC)
+      - id: auth
+        name: "Authenticate to GCP using OIDC"
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker --quiet
+
+      - name: Build & Push Docker image
+        run: |
+          IMAGE_HOST="${IMAGE_HOST}"
+          PROJECT="${{ secrets.GCP_PROJECT_ID }}"
+          REPO="${ARTIFACT_REPO}"
+          FULL_IMAGE="\${IMAGE_HOST}/\${PROJECT}/\${REPO}/${IMAGE_NAME}:${IMAGE_TAG}"
+          echo "FULL_IMAGE=\${FULL_IMAGE}" >> $GITHUB_ENV
+          docker build -t "\${FULL_IMAGE}" -f docker/Dockerfile .
+          docker push "\${FULL_IMAGE}"
+
+      - name: Write terraform.tfvars
+        run: |
+          mkdir -p infra/terraform
+          cat > infra/terraform/terraform.tfvars <<TFVARS
+project_id = "${{ secrets.GCP_PROJECT_ID }}"
+region     = "us-central1"
+zone       = "us-central1-a"
+container_image = "${{ env.FULL_IMAGE }}"
+vm_name = "fastapi-vm"
+TFVARS
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.7
+
+      - name: Terraform Init
+        working-directory: infra/terraform
+        run: terraform init -input=false
+
+      - name: Terraform Plan
+        working-directory: infra/terraform
+        run: terraform plan -input=false -var="container_image=${{ env.FULL_IMAGE }}" -out=tfplan
+
+      - name: Terraform Apply
+        working-directory: infra/terraform
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Print VM IP
+        working-directory: infra/terraform
+        run: echo "VM IP: \$(terraform output -raw vm_ip)"
