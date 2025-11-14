@@ -35,7 +35,7 @@ jobs:
         run: |
           gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
-      - name: Build and push Docker image
+      - name: Build and Push Docker image
         run: |
           PROJECT=${{ secrets.GCP_PROJECT_ID }}
           FULL_IMAGE="${{ env.IMAGE_HOST }}/${PROJECT}/${{ env.ARTIFACT_REPO }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
@@ -77,10 +77,13 @@ TFVARS
       - name: Terraform Plan & Apply
         working-directory: infra/terraform
         run: |
-          terraform plan -input=false -out=tfplan -var="container_image=${{ env.FULL_IMAGE }}" -var="ssh_public_key=${{ env.SSH_PUB }}" -var="ssh_user=github"
+          terraform plan -input=false -out=tfplan \
+            -var="container_image=${{ env.FULL_IMAGE }}" \
+            -var="ssh_public_key=${{ env.SSH_PUB }}" \
+            -var="ssh_user=github"
           terraform apply -input=false -auto-approve tfplan
 
-      - name: Wait for VM (sleep)
+      - name: Wait for VM
         run: sleep 15
 
       - name: Get VM IP
@@ -89,22 +92,21 @@ TFVARS
           cd infra/terraform
           VM_IP=$(terraform output -raw vm_ip)
           echo "VM_IP=${VM_IP}" >> $GITHUB_ENV
-          echo "VM_IP=${VM_IP}" > vm_ip.txt
-          echo "::set-output name=vm_ip::${VM_IP}"
+          echo "vm_ip=${VM_IP}" >> $GITHUB_OUTPUT
 
-      - name: SSH deploy - run container on VM
+      - name: SSH Deploy - Run container
         run: |
           KEY_DIR=${{ env.SSH_KEY_DIR }}
           VM_IP=${{ env.VM_IP }}
           FULL_IMAGE=${{ env.FULL_IMAGE }}
-          # Use the generated private key
+
           chmod 600 "${KEY_DIR}/id_ed25519"
-          # Avoid host key check for ephemeral env
+
           SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes"
-          # Pull and run container with sudo (VM user 'github' created via metadata 'ssh-keys')
+
           ssh $SSH_OPTS -i "${KEY_DIR}/id_ed25519" github@${VM_IP} \
             "sudo gcloud auth configure-docker us-central1-docker.pkg.dev --quiet || true; \
-             sudo docker pull ${FULL_IMAGE} && \
-             sudo docker rm -f fastapi-app || true && \
+             sudo docker pull ${FULL_IMAGE}; \
+             sudo docker rm -f fastapi-app || true; \
              sudo docker run -d --restart unless-stopped --name fastapi-app -p 8000:8000 ${FULL_IMAGE}"
 
